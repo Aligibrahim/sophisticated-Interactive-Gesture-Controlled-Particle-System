@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #input-video { display:none; }
+    </style>
+</head>
+<body>
+
+    <video id="input-video"></video>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+    let scene, camera, renderer, particles;
+    let handPosition = { x: 0, y: 0, z: 0 };
+    
+    let handClosed = false;
+    let isPinching = false;
+    let isHalfHeart = false;
+    let isTextGesture = false;
+
+    let originalPositions;
+    let heartPositions;
+    let textPositions;
+
+    let interactionFactor = 0; 
+    let textBlendFactor = 0;
+
+    let smoothWindowX = window.screenX;
+    let smoothWindowY = window.screenY;
+    let prevSmoothX = window.screenX;
+    let prevSmoothY = window.screenY;
+    let velocityX = 0;
+    let velocityY = 0;
+
+    function getCircleTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 32;
+        canvas.height = 32;
+        const ctx = canvas.getContext('2d');
+        ctx.beginPath();
+        ctx.arc(16, 16, 15, 0, 2 * Math.PI);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fill();
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    function generateTextPositions(text, particleCount) {
+        const canvas = document.createElement('canvas');
+        const size = 1024;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+
+        ctx.font = 'bold 90px Times New Roman';
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, size / 2, size / 2);
+
+        const imageData = ctx.getImageData(0, 0, size, size);
+        const data = imageData.data;
+        const validPoints = [];
+
+        for (let y = 0; y < size; y += 4) {
+            for (let x = 0; x < size; x += 4) {
+                const index = (y * size + x) * 4;
+                if (data[index + 3] > 128) {
+                    const px = (x - size / 2) * 0.015;
+                    const py = -(y - size / 2) * 0.015; 
+                    validPoints.push({ x: px, y: py });
+                }
+            }
+        }
+
+        const resultPositions = [];
+        for (let i = 0; i < particleCount; i++) {
+            const point = validPoints[Math.floor(Math.random() * validPoints.length)];
+            resultPositions.push(point.x);
+            resultPositions.push(point.y);
+            resultPositions.push((Math.random() - 0.5) * 0.2);
+        }
+        return new Float32Array(resultPositions);
+    }
+
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 5;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        createParticles();
+        initMediaPipe(); 
+        animate();
+    }
+    
+    function createParticles() {
+        if (particles) scene.remove(particles);
+
+        const geometry = new THREE.BufferGeometry();
+        const positions = [];
+        const originals = []; 
+        const hearts = []; 
+
+        const particleCount = 20000; 
+
+        textPositions = generateTextPositions("thinking...", particleCount); 
+
+        for (let i = 0; i < particleCount; i++) {
+            const r = 2 * Math.cbrt(Math.random()); 
+            const theta = Math.random() * 2 * Math.PI;
+            const phi = Math.acos(2 * Math.random() - 1);
+            
+            const x = r * Math.sin(phi) * Math.cos(theta);
+            const y = r * Math.sin(phi) * Math.sin(theta);
+            const z = r * Math.cos(phi);
+
+            positions.push(x, y, z);
+            originals.push(x, y, z); 
+
+            const t = Math.random() * Math.PI; 
+            const scale = Math.sqrt(Math.random()); 
+            const hx = ((16 * Math.pow(Math.sin(t), 3)) * scale) * 0.1 + 1.5; 
+            const hy = ((13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * scale) * 0.1;
+            const hz = (Math.random() - 0.5) * 1; 
+            hearts.push(hx, hy, hz);
+        }
+
+        originalPositions = new Float32Array(originals);
+        heartPositions = new Float32Array(hearts); 
+
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+        const material = new THREE.PointsMaterial({
+            color: 0xffffff, 
+            size: 0.02,      
+            transparent: true,
+            opacity: 0.8,
+            map: getCircleTexture(),
+            alphaTest: 0.5
+        });
+
+        particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        let targetWindowX = window.screenX;
+        let targetWindowY = window.screenY;
+        smoothWindowX += (targetWindowX - smoothWindowX) * 0.1;
+        smoothWindowY += (targetWindowY - smoothWindowY) * 0.1;
+
+        const deltaX = smoothWindowX - prevSmoothX;
+        const deltaY = smoothWindowY - prevSmoothY;
+        prevSmoothX = smoothWindowX;
+        prevSmoothY = smoothWindowY;
+
+        velocityX -= deltaX * 0.05; 
+        velocityY += deltaY * 0.05;
+
+        if (particles) {
+            particles.position.x += velocityX;
+            particles.position.y += velocityY;
+            velocityX *= 0.90;
+            velocityY *= 0.90;
+            particles.position.x += (0 - particles.position.x) * 0.05;
+            particles.position.y += (0 - particles.position.y) * 0.05;
+            
+            if (!isHalfHeart && !isTextGesture) {
+                particles.rotation.y += 0.002;
+            } else {
+                particles.rotation.y += (0 - particles.rotation.y) * 0.1;
+            }
+        }
+
+        let targetFist = handClosed ? 1.0 : 0.0;
+        interactionFactor += (targetFist - interactionFactor) * 0.1;
+
+        let targetText = isTextGesture ? 1.0 : 0.0;
+        textBlendFactor += (targetText - textBlendFactor) * 0.05;
+
+        if (particles && originalPositions.length > 0) {
+            const positions = particles.geometry.attributes.position.array;
+
+            for (let i = 0; i < 20000; i++) {
+                const i3 = i * 3;
+
+                const ox = originalPositions[i3];
+                const oy = originalPositions[i3 + 1];
+                const oz = originalPositions[i3 + 2];
+
+                const hrtX = heartPositions[i3];
+                const hrtY = heartPositions[i3 + 1];
+                const hrtZ = heartPositions[i3 + 2];
+
+                const txtX = textPositions[i3];
+                const txtY = textPositions[i3 + 1];
+                const txtZ = textPositions[i3 + 2];
+
+                let currentX = ox;
+                let currentY = oy;
+                let currentZ = oz;
+
+                if (textBlendFactor > 0.001) {
+                    currentX = ox + (txtX - ox) * textBlendFactor;
+                    currentY = oy + (txtY - oy) * textBlendFactor;
+                    currentZ = oz + (txtZ - oz) * textBlendFactor;
+                }
+                else if (isHalfHeart && !handClosed) {
+                    currentX = hrtX + handPosition.x;
+                    currentY = hrtY + handPosition.y;
+                    currentZ = hrtZ + handPosition.z;
+                }
+                else if (isPinching && !handClosed) {
+                    currentX = ox * 3;
+                    currentY = oy * 3;
+                    currentZ = oz * 3;
+                }
+
+                const hx = handPosition.x;
+                const hy = handPosition.y;
+                const hz = handPosition.z;
+
+                positions[i3]     = currentX + (hx - currentX) * interactionFactor;
+                positions[i3 + 1] = currentY + (hy - currentY) * interactionFactor;
+                positions[i3 + 2] = currentZ + (hz - currentZ) * interactionFactor;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    function initMediaPipe() {
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onHandResults);
+
+        const videoElement = document.getElementById('input-video');
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+    }
+
+    function onHandResults(results) {
+        if (results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            const wrist = landmarks[0];
+
+            handPosition.x = (0.5 - wrist.x) * 10; 
+            handPosition.y = (0.5 - wrist.y) * 8;
+            handPosition.z = 0; 
+
+            const tips = [8, 12, 16, 20]; 
+            let avgDist = 0;
+            tips.forEach(tipIndex => {
+                const tip = landmarks[tipIndex];
+                const dx = tip.x - wrist.x;
+                const dy = tip.y - wrist.y;
+                avgDist += Math.sqrt(dx*dx + dy*dy);
+            });
+            avgDist /= 4; 
+            handClosed = (avgDist < 0.15);
+
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const pinchDx = thumbTip.x - indexTip.x;
+            const pinchDy = thumbTip.y - indexTip.y;
+            const pinchDist = Math.sqrt(pinchDx*pinchDx + pinchDy*pinchDy);
+            isPinching = (pinchDist < 0.05);
+
+            const handedness = results.multiHandedness[0].label; 
+            if (handedness === 'Right') { 
+                const thumbBase = landmarks[2]; 
+                const vecY = thumbTip.y - thumbBase.y; 
+                const vecX = thumbTip.x - thumbBase.x;
+                
+                const isPointingDown = (vecY > 0) && (Math.abs(vecY) > Math.abs(vecX));
+                isHalfHeart = isPointingDown;
+            } else {
+                isHalfHeart = false;
+            }
+
+            const indexUp = landmarks[8].y < landmarks[6].y;
+            const middleDown = landmarks[12].y > landmarks[10].y;
+            const ringDown = landmarks[16].y > landmarks[14].y;
+            const pinkyDown = landmarks[20].y > landmarks[18].y;
+
+            if (indexUp && middleDown && ringDown && pinkyDown) {
+                isTextGesture = true;
+            } else {
+                isTextGesture = false;
+            }
+
+        } else {
+            handClosed = false;
+            isPinching = false;
+            isHalfHeart = false;
+            isTextGesture = false;
+        }
+    }
+    
+    init();
+</script>
+</body>
+</html>
